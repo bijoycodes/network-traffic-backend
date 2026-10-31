@@ -166,3 +166,7 @@
 [2026-10-31 06:35:00] [INFO] [device_id=dev_pixel_9_02] Successfully wrote data to CSV file.
 [2026-10-31 06:35:00] [INFO] [device_id=dev_pixel_9_02] Successfully stored data in database.
 [2026-10-31 06:35:00] [INFO] [device_id=dev_pixel_9_02] Network analysis request processed successfully.
+[2026-10-31 13:30:34] [INFO] [device_id=dev_pixel_9_02] Starting network analysis request.
+[2026-10-31 13:30:54] [INFO] [device_id=dev_pixel_9_02] Successfully wrote data to CSV file.
+[2026-10-31 13:30:54] [INFO] [device_id=dev_pixel_9_02] Successfully stored data in database.
+[2026-10-31 13:30:54] [INFO] [device_id=dev_pixel_9_02] Network analysis request processed successfully.

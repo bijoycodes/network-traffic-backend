@@ -1,144 +1,9 @@
 
 <?php
-require_once __DIR__ . "/includes/database.php";
-
-/**
- * AJAX: Fetch network analysis records.
- */
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'fetch') {
-    header('Content-Type: application/json; charset=utf-8');
-
-    try {
-        $pdo = connectDatabase();
-
-        $search = trim($_POST['search'] ?? '');
-        $page = max(1, (int) ($_POST['page'] ?? 1));
-        $limit = 15;
-        $offset = ($page - 1) * $limit;
-
-        // Columns that can be searched.
-        $searchColumns = [
-            'device_id',
-            'device_name',
-            'session_id',
-            'app_name',
-            'domain',
-            'domain_source',
-            'ip',
-            'dns',
-            'protocol',
-            'geo_location',
-            'risk_level',
-            'analysis_result'
-        ];
-
-        $where = '';
-        $params = [];
-
-        if ($search !== '') {
-            $conditions = [];
-
-            foreach ($searchColumns as $column) {
-                $conditions[] = "`$column` LIKE ?";
-                $params[] = "%{$search}%";
-            }
-
-            // Also search numeric fields.
-            $conditions[] = "CAST(port AS CHAR) LIKE ?";
-            $params[] = "%{$search}%";
-
-            $conditions[] = "CAST(total_bytes AS CHAR) LIKE ?";
-            $params[] = "%{$search}%";
-
-            $where = 'WHERE (' . implode(' OR ', $conditions) . ')';
-        }
-
-        // Get total matching records.
-        $countSql = "
-            SELECT COUNT(*)
-            FROM network_analysis_data
-            $where
-        ";
-
-        $countStmt = $pdo->prepare($countSql);
-        $countStmt->execute($params);
-
-        $totalRecords = (int) $countStmt->fetchColumn();
-        $totalPages = max(1, (int) ceil($totalRecords / $limit));
-
-        // Fetch current page.
-        $sql = "
-            SELECT
-                id,
-                device_id,
-                device_name,
-                session_id,
-                app_name,
-                domain,
-                domain_source,
-                ip,
-                dns,
-                port,
-                protocol,
-                timestamp,
-                request_size_bytes,
-                response_size_bytes,
-                total_bytes,
-                connection_frequency,
-                geo_location,
-                risk_level,
-                analysis_result,
-                full_json_request,
-                ml_response,
-                llm_response
-            FROM network_analysis_data
-            $where
-            ORDER BY timestamp DESC
-            LIMIT ? OFFSET ?
-        ";
-
-        $stmt = $pdo->prepare($sql);
-
-        $index = 1;
-
-        foreach ($params as $param) {
-            $stmt->bindValue($index++, $param, PDO::PARAM_STR);
-        }
-
-        $stmt->bindValue($index++, $limit, PDO::PARAM_INT);
-        $stmt->bindValue($index, $offset, PDO::PARAM_INT);
-
-        $stmt->execute();
-
-        $records = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-        echo json_encode([
-            'success' => true,
-            'records' => $records,
-            'pagination' => [
-                'current_page' => $page,
-                'total_pages' => $totalPages,
-                'total_records' => $totalRecords,
-                'limit' => $limit
-            ]
-        ], JSON_INVALID_UTF8_SUBSTITUTE);
-
-    } catch (Throwable $e) {
-        http_response_code(500);
-
-        echo json_encode([
-            'success' => false,
-            'message' => 'Unable to fetch records.',
-            'error' => $e->getMessage()
-        ]);
-    }
-
-    exit;
-}
 ?>
-
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -163,13 +28,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'fetch
             margin: auto;
         }
 
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 15px;
+            flex-wrap: wrap;
+            margin-bottom: 20px;
+        }
+
         h1 {
-            margin-bottom: 8px;
+            margin: 0 0 8px;
         }
 
         .subtitle {
             color: #777;
-            margin-bottom: 25px;
+            margin: 0;
+        }
+
+        .status {
+            color: #16803d;
+            font-size: 13px;
         }
 
         .toolbar {
@@ -192,11 +71,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'fetch
 
         #searchInput:focus {
             border-color: #555;
-        }
-
-        .record-count {
-            color: #666;
-            font-size: 14px;
         }
 
         .table-wrapper {
@@ -223,7 +97,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'fetch
         th {
             background: #f9fafb;
             color: #555;
-            font-weight: 600;
         }
 
         tr:hover td {
@@ -361,10 +234,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'fetch
 
 <div class="container">
 
-    <h1>Network Analysis</h1>
-    <p class="subtitle">View and search your network traffic records.</p>
+    <div class="header">
+        <div>
+            <h1>Network Analysis</h1>
+            <p class="subtitle">Live network traffic monitoring</p>
+        </div>
+
+        <div class="status" id="updateStatus">
+            Connecting...
+        </div>
+    </div>
 
     <div class="toolbar">
+
         <input
             type="search"
             id="searchInput"
@@ -372,12 +254,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'fetch
             autocomplete="off"
         >
 
-        <div class="record-count" id="recordCount">
+        <div id="recordCount">
             Loading records...
         </div>
+
     </div>
 
     <div class="table-wrapper">
+
         <table>
             <thead>
                 <tr>
@@ -398,10 +282,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'fetch
 
             <tbody id="tableBody">
                 <tr>
-                    <td colspan="12" class="message">Loading records...</td>
+                    <td colspan="12" class="message">
+                        Loading records...
+                    </td>
                 </tr>
             </tbody>
         </table>
+
     </div>
 
     <div class="pagination">
@@ -413,19 +300,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'fetch
 </div>
 
 <script>
+    const API_URL = 'api/analysis.php';
+
+    const REFRESH_INTERVAL = 20000;
+    const PAGE_LIMIT = 15;
+
     const searchInput = document.getElementById('searchInput');
     const tableBody = document.getElementById('tableBody');
     const recordCount = document.getElementById('recordCount');
+    const updateStatus = document.getElementById('updateStatus');
+
     const prevButton = document.getElementById('prevButton');
     const nextButton = document.getElementById('nextButton');
     const pageInfo = document.getElementById('pageInfo');
 
     let currentPage = 1;
     let totalPages = 1;
+
+    let lastRecords = null;
     let searchTimer = null;
+    let activeController = null;
 
     /**
-     * Escape HTML to prevent XSS.
+     * Escape HTML.
      */
     function escapeHTML(value) {
         return String(value ?? '').replace(/[&<>"']/g, char => ({
@@ -438,7 +335,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'fetch
     }
 
     /**
-     * Format JSON data.
+     * Format JSON.
      */
     function formatJSON(value) {
         if (!value) {
@@ -457,7 +354,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'fetch
     }
 
     /**
-     * Generate risk-level class.
+     * Risk level class.
      */
     function getRiskClass(risk) {
         const value = String(risk ?? '').toLowerCase();
@@ -470,9 +367,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'fetch
     }
 
     /**
-     * Render table rows.
+     * Render records.
      */
     function renderRecords(records) {
+
+        // Remember which details are currently open.
+        const openedDetails = new Set();
+
+        document.querySelectorAll('.details-row:not([hidden])').forEach(row => {
+            openedDetails.add(row.id);
+        });
+
         if (!records.length) {
             tableBody.innerHTML = `
                 <tr>
@@ -486,15 +391,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'fetch
 
         tableBody.innerHTML = records.map(record => {
             const id = Number(record.id);
+            const detailsId = `details-${id}`;
+            const isOpen = openedDetails.has(detailsId);
 
             return `
                 <tr>
                     <td>${escapeHTML(record.id)}</td>
+
                     <td>
                         <strong>${escapeHTML(record.device_name)}</strong>
                         <br>
                         <small>${escapeHTML(record.device_id)}</small>
                     </td>
+
                     <td>${escapeHTML(record.app_name)}</td>
                     <td>${escapeHTML(record.domain)}</td>
                     <td>${escapeHTML(record.ip)}</td>
@@ -502,30 +411,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'fetch
                     <td>${escapeHTML(record.protocol)}</td>
                     <td>${escapeHTML(record.total_bytes)}</td>
                     <td>${escapeHTML(record.geo_location)}</td>
+
                     <td>
                         <span class="risk ${getRiskClass(record.risk_level)}">
                             ${escapeHTML(record.risk_level)}
                         </span>
                     </td>
+
                     <td>${escapeHTML(record.timestamp)}</td>
+
                     <td>
                         <button
                             class="details-button"
                             type="button"
                             data-id="${id}"
                         >
-                            View
+                            ${isOpen ? 'Hide' : 'View'}
                         </button>
                     </td>
                 </tr>
 
                 <tr
                     class="details-row"
-                    id="details-${id}"
-                    hidden
+                    id="${detailsId}"
+                    ${isOpen ? '' : 'hidden'}
                 >
                     <td colspan="12">
+
                         <div class="details-content">
+
                             <div class="json-card">
                                 <h4>Full JSON Request</h4>
                                 <pre>${formatJSON(record.full_json_request)}</pre>
@@ -540,6 +454,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'fetch
                                 <h4>LLM Response</h4>
                                 <pre>${formatJSON(record.llm_response)}</pre>
                             </div>
+
                         </div>
 
                         <p class="analysis-text">
@@ -572,6 +487,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'fetch
                             <strong>Connections:</strong>
                             ${escapeHTML(record.connection_frequency)}
                         </p>
+
                     </td>
                 </tr>
             `;
@@ -579,44 +495,68 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'fetch
     }
 
     /**
-     * Fetch records using AJAX.
+     * Fetch records from API.
+     *
+     * force = true cancels an older request.
      */
-    async function fetchRecords(page = 1) {
+    async function fetchRecords(page = currentPage, force = false) {
+
+        if (activeController && !force) {
+            return;
+        }
+
+        if (activeController) {
+            activeController.abort();
+        }
+
+        const controller = new AbortController();
+        activeController = controller;
+
         currentPage = page;
 
-        tableBody.innerHTML = `
-            <tr>
-                <td colspan="12" class="message">Loading records...</td>
-            </tr>
-        `;
-
-        prevButton.disabled = true;
-        nextButton.disabled = true;
-
-        const formData = new FormData();
-
-        formData.append('action', 'fetch');
-        formData.append('search', searchInput.value.trim());
-        formData.append('page', currentPage);
+        const params = new URLSearchParams({
+            search: searchInput.value.trim(),
+            page: currentPage,
+            limit: PAGE_LIMIT
+        });
 
         try {
-            const response = await fetch(window.location.href, {
-                method: 'POST',
-                body: formData,
+            const response = await fetch(`${API_URL}?${params.toString()}`, {
+                method: 'GET',
+                cache: 'no-store',
+                signal: controller.signal,
                 headers: {
-                    'X-Requested-With': 'XMLHttpRequest'
+                    'Accept': 'application/json'
                 }
             });
 
-            const result = await response.json();
-
-            if (!response.ok || !result.success) {
-                throw new Error(result.message || 'Something went wrong.');
+            if (!response.ok) {
+                throw new Error(`HTTP error: ${response.status}`);
             }
 
-            renderRecords(result.records);
+            const result = await response.json();
 
+            if (!result.success) {
+                throw new Error(result.message || 'API request failed.');
+            }
+
+            // Ignore results from an outdated request.
+            if (activeController !== controller) {
+                return;
+            }
+
+            const records = result.records;
             const pagination = result.pagination;
+
+            // Compare new records with previously fetched records.
+            const newData = JSON.stringify(records);
+            const hasChanged = newData !== lastRecords;
+
+            // Only update the table when data actually changes.
+            if (hasChanged) {
+                renderRecords(records);
+                lastRecords = newData;
+            }
 
             totalPages = pagination.total_pages;
 
@@ -629,18 +569,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'fetch
             prevButton.disabled = currentPage <= 1;
             nextButton.disabled = currentPage >= totalPages;
 
+            const now = new Date().toLocaleTimeString();
+
+            updateStatus.textContent = hasChanged
+                ? `Updated: ${now}`
+                : `No changes · Checked: ${now}`;
+
         } catch (error) {
-            console.error(error);
 
-            tableBody.innerHTML = `
-                <tr>
-                    <td colspan="12" class="message">
-                        ${escapeHTML(error.message)}
-                    </td>
-                </tr>
-            `;
+            if (error.name === 'AbortError') {
+                return;
+            }
 
-            recordCount.textContent = 'Unable to load records.';
+            console.error('Fetch error:', error);
+
+            updateStatus.textContent = 'Connection error. Retrying...';
+
+            if (lastRecords === null) {
+                tableBody.innerHTML = `
+                    <tr>
+                        <td colspan="12" class="message">
+                            Unable to load records.
+                        </td>
+                    </tr>
+                `;
+            }
+
+        } finally {
+
+            if (activeController === controller) {
+                activeController = null;
+            }
         }
     }
 
@@ -648,11 +607,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'fetch
      * Search with debounce.
      */
     searchInput.addEventListener('input', () => {
+
         clearTimeout(searchTimer);
 
         searchTimer = setTimeout(() => {
-            fetchRecords(1);
+            lastRecords = null;
+            fetchRecords(1, true);
         }, 350);
+
     });
 
     /**
@@ -660,20 +622,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'fetch
      */
     prevButton.addEventListener('click', () => {
         if (currentPage > 1) {
-            fetchRecords(currentPage - 1);
+            lastRecords = null;
+            fetchRecords(currentPage - 1, true);
         }
     });
 
     nextButton.addEventListener('click', () => {
         if (currentPage < totalPages) {
-            fetchRecords(currentPage + 1);
+            lastRecords = null;
+            fetchRecords(currentPage + 1, true);
         }
     });
 
     /**
-     * Toggle record details.
+     * Toggle details.
      */
     tableBody.addEventListener('click', event => {
+
         const button = event.target.closest('.details-button');
 
         if (!button) return;
@@ -689,8 +654,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'fetch
         button.textContent = details.hidden ? 'View' : 'Hide';
     });
 
-    // Initial fetch.
-    fetchRecords(1);
+    /**
+     * Initial fetch.
+     */
+    fetchRecords(1, true);
+
+    /**
+     * Automatically check for changes every 20 seconds.
+     */
+    setInterval(() => {
+
+        // Avoid unnecessary requests when the browser tab is hidden.
+        if (document.hidden) {
+            return;
+        }
+
+        fetchRecords(currentPage);
+
+    }, REFRESH_INTERVAL);
+
 </script>
 
 </body>
