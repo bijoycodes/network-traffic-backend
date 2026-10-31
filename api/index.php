@@ -73,13 +73,75 @@ Use empty arrays when no evidence or recommendations can be supported.
 Do not include claims that go beyond the supplied information.
 PROMPT;
 
+function writeLog( string $message, string $level = "INFO", ?string $deviceId = null): void {
+    $logFile = __DIR__ . "/network-analysis.log";
 
-function sendJsonRequest(string $url, array $payload): array
-{
-    $json = json_encode(
-        $payload,
-        JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
+    $timestamp = date("Y-m-d H:i:s");
+    $deviceIdentifier = $deviceId ?? "unknown";
+
+    $logMessage = sprintf(
+        "[%s] [%s] [device_id=%s] %s%s",
+        $timestamp,
+        strtoupper($level),
+        $deviceIdentifier,
+        $message,
+        PHP_EOL
     );
+
+    file_put_contents(
+        $logFile,
+        $logMessage,
+        FILE_APPEND | LOCK_EX
+    );
+}
+
+function writeInCsv( array $data, array $mlResponse, array $llmResponse ): void {
+    $file = __DIR__ . "/network-analysis.csv";
+
+    $handle = fopen($file, "a");
+
+    if ($handle) {
+        $full_json_request = json_encode( $data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR );
+        $ml_response = json_encode( $mlResponse, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR );
+        $llm_response = json_encode( $llmResponse, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR );
+
+        $full_json_request = str_replace( ["\r\n", "\r", "\n", ","], ["\\n", "\\n", "\\n", "\\,"], $full_json_request );
+        $ml_response = str_replace( ["\r\n", "\r", "\n", ","], ["\\n", "\\n", "\\n", "\\,"], $ml_response );
+        $llm_response = str_replace( ["\r\n", "\r", "\n", ","], ["\\n", "\\n", "\\n", "\\,"], $llm_response );
+    
+        fputcsv($handle, [
+            $data['device_id'] ?? '',
+            $data['device_name'] ?? '',
+            $data['session_id'] ?? '',
+            $data['app_name'] ?? '',
+            $data['domain'] ?? '',
+            $data['domain_source'] ?? '',
+            $data['ip'] ?? '',
+            $data['dns'] ?? '',
+            $data['port'] ?? '',
+            $data['protocol'] ?? '',
+            $data['timestamp'] ?? '',
+            $data['request_size_bytes'] ?? '',
+            $data['response_size_bytes'] ?? '',
+            $data['total_bytes'] ?? '',
+            $data['connection_frequency'] ?? '',
+            $data['geo_location'] ?? '',
+            $data['risk_level'] ?? '',
+            $data['analysis_result'] ?? '',
+            $full_json_request,
+            $ml_response,
+            $llm_response,
+        ]);
+
+        fclose($handle);
+        writeLog("Successfully wrote data to CSV file.", "INFO", $data['device_id'] ?? null);
+    } else {
+        writeLog("Failed to open CSV file for writing.", "ERROR", $data['device_id'] ?? null);
+    }
+}
+
+function sendJsonRequest(string $url, array $payload): array {
+    $json = json_encode( $payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
 
     if ($json === false) {
         throw new RuntimeException("Failed to encode JSON request.");
@@ -106,15 +168,11 @@ function sendJsonRequest(string $url, array $payload): array
     curl_close($ch);
 
     if ($response === false) {
-        throw new RuntimeException(
-            "Service connection failed: " . $curlError
-        );
+        throw new RuntimeException( "Service connection failed: " . $curlError );
     }
 
     if ($httpCode < 200 || $httpCode >= 300) {
-        throw new RuntimeException(
-            "Service returned HTTP " . $httpCode
-        );
+        throw new RuntimeException( "Service returned HTTP " . $httpCode );
     }
 
     $decoded = json_decode($response, true);
@@ -127,21 +185,17 @@ function sendJsonRequest(string $url, array $payload): array
 }
 
 
-function respond(int $statusCode, array $body): void
-{
+function respond(int $statusCode, array $body): void {
     http_response_code($statusCode);
 
-    echo json_encode(
-        $body,
-        JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
-    );
-
+    echo json_encode( $body, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
     exit;
 }
 
 
 if ($_SERVER["REQUEST_METHOD"] !== "POST") {
     header("Allow: POST");
+    writeLog( "Rejected request with unsupported method: " . $_SERVER["REQUEST_METHOD"], "WARNING", null );
 
     respond(405, [
         "success" => false,
@@ -153,27 +207,34 @@ if ($_SERVER["REQUEST_METHOD"] !== "POST") {
 $jsonBody = file_get_contents("php://input");
 $data = json_decode($jsonBody, true);
 
-if (
-    json_last_error() !== JSON_ERROR_NONE ||
-    !is_array($data) ||
-    array_is_list($data)
-) {
+$deviceId = null;
+
+if ( json_last_error() !== JSON_ERROR_NONE || !is_array($data) || array_is_list($data) ) {
+    writeLog( "Rejected request with invalid JSON input.", "WARNING", $deviceId ?? null );
+
     respond(400, [
         "success" => false,
         "message" => "A valid JSON object is required.",
     ]);
 }
 
+if (isset($data["device_id"]) && is_scalar($data["device_id"])) {
+    $deviceId = (string) $data["device_id"];
+}
 
 try {
+    writeLog("Starting network analysis request.", "INFO", $deviceId);
+
     // Step 1: Send the Android traffic data to the ML API.
     $mlResponse = sendJsonRequest($ml_end_point, $data);
 
-    if (
-        !isset($mlResponse["predicted_risk_level"]) ||
-        !is_string($mlResponse["predicted_risk_level"]) ||
-        $mlResponse["predicted_risk_level"] === ""
-    ) {
+    if ( !isset($mlResponse["predicted_risk_level"]) || !is_string($mlResponse["predicted_risk_level"]) || $mlResponse["predicted_risk_level"] === "" ) {
+        writeLog(
+            "ML service returned an invalid prediction.",
+            "ERROR",
+            $deviceId
+        );
+
         respond(502, [
             "success" => false,
             "message" => "The ML service did not return a valid prediction.",
@@ -205,6 +266,8 @@ try {
     $llmContent = $llmResponse["message"]["content"] ?? null;
 
     if (!is_string($llmContent) || trim($llmContent) === "") {
+        writeLog("LLM returned an empty explanation.", "ERROR", $deviceId);
+
         respond(502, [
             "success" => false,
             "message" => "The LLM returned an empty explanation.",
@@ -215,11 +278,9 @@ try {
     // Step 3: Parse the JSON generated by the LLM.
     $explanation = json_decode($llmContent, true);
 
-    if (
-        json_last_error() !== JSON_ERROR_NONE ||
-        !is_array($explanation) ||
-        array_is_list($explanation)
-    ) {
+    if ( json_last_error() !== JSON_ERROR_NONE || !is_array($explanation) || array_is_list($explanation) ) {
+        writeLog( "LLM returned an invalid explanation format.", "ERROR", $deviceId );
+
         respond(502, [
             "success" => false,
             "message" => "The LLM returned an invalid explanation format.",
@@ -228,6 +289,10 @@ try {
     }
 
     // Step 4: Return a clean response to the Android app.
+    writeInCsv($data, $mlResponse, $llmResponse);
+
+    writeLog( "Network analysis request processed successfully.", "INFO", $deviceId );
+
     respond(200, [
         "success" => true,
         "ml_prediction" => $mlResponse,
@@ -235,7 +300,7 @@ try {
     ]);
 
 } catch (RuntimeException $e) {
-    error_log("Network analysis pipeline error: " . $e->getMessage());
+    writeLog( "Network analysis pipeline error: " . $e->getMessage(), "ERROR", $deviceId ?? null );
 
     respond(502, [
         "success" => false,
@@ -243,7 +308,7 @@ try {
     ]);
 
 } catch (Throwable $e) {
-    error_log("Unexpected network analysis error: " . $e->getMessage());
+    writeLog( "Unexpected network analysis error: " . $e->getMessage(), "ERROR", $deviceId ?? null );
 
     respond(500, [
         "success" => false,
