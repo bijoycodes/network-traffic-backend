@@ -1,6 +1,10 @@
 
 <?php
 
+require_once __DIR__ . "/../includes/database.php";
+require_once __DIR__ . "/../includes/log.php";
+require_once __DIR__ . "/../includes/csv.php";
+
 $ml_end_point = "http://localhost:8001/predict";
 $llm_end_point = "http://localhost:11434/api/chat";
 $llm_model = "gemma:7b";
@@ -73,72 +77,7 @@ Use empty arrays when no evidence or recommendations can be supported.
 Do not include claims that go beyond the supplied information.
 PROMPT;
 
-function writeLog( string $message, string $level = "INFO", ?string $deviceId = null): void {
-    $logFile = __DIR__ . "/network-analysis.log";
 
-    $timestamp = date("Y-m-d H:i:s");
-    $deviceIdentifier = $deviceId ?? "unknown";
-
-    $logMessage = sprintf(
-        "[%s] [%s] [device_id=%s] %s%s",
-        $timestamp,
-        strtoupper($level),
-        $deviceIdentifier,
-        $message,
-        PHP_EOL
-    );
-
-    file_put_contents(
-        $logFile,
-        $logMessage,
-        FILE_APPEND | LOCK_EX
-    );
-}
-
-function writeInCsv( array $data, array $mlResponse, array $llmResponse ): void {
-    $file = __DIR__ . "/network-analysis.csv";
-
-    $handle = fopen($file, "a");
-
-    if ($handle) {
-        $full_json_request = json_encode( $data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR );
-        $ml_response = json_encode( $mlResponse, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR );
-        $llm_response = json_encode( $llmResponse, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR );
-
-        $full_json_request = str_replace( ["\r\n", "\r", "\n", ","], ["\\n", "\\n", "\\n", "\\,"], $full_json_request );
-        $ml_response = str_replace( ["\r\n", "\r", "\n", ","], ["\\n", "\\n", "\\n", "\\,"], $ml_response );
-        $llm_response = str_replace( ["\r\n", "\r", "\n", ","], ["\\n", "\\n", "\\n", "\\,"], $llm_response );
-    
-        fputcsv($handle, [
-            $data['device_id'] ?? '',
-            $data['device_name'] ?? '',
-            $data['session_id'] ?? '',
-            $data['app_name'] ?? '',
-            $data['domain'] ?? '',
-            $data['domain_source'] ?? '',
-            $data['ip'] ?? '',
-            $data['dns'] ?? '',
-            $data['port'] ?? '',
-            $data['protocol'] ?? '',
-            $data['timestamp'] ?? '',
-            $data['request_size_bytes'] ?? '',
-            $data['response_size_bytes'] ?? '',
-            $data['total_bytes'] ?? '',
-            $data['connection_frequency'] ?? '',
-            $data['geo_location'] ?? '',
-            $data['risk_level'] ?? '',
-            $data['analysis_result'] ?? '',
-            $full_json_request,
-            $ml_response,
-            $llm_response,
-        ]);
-
-        fclose($handle);
-        writeLog("Successfully wrote data to CSV file.", "INFO", $data['device_id'] ?? null);
-    } else {
-        writeLog("Failed to open CSV file for writing.", "ERROR", $data['device_id'] ?? null);
-    }
-}
 
 function sendJsonRequest(string $url, array $payload): array {
     $json = json_encode( $payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
@@ -290,6 +229,7 @@ try {
 
     // Step 4: Return a clean response to the Android app.
     writeInCsv($data, $mlResponse, $llmResponse);
+    writeInDatabase($data, $mlResponse, $llmResponse);
 
     writeLog( "Network analysis request processed successfully.", "INFO", $deviceId );
 
